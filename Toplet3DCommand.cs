@@ -24,17 +24,6 @@ namespace Toplet_v0_Alpha
             Faces
         }
 
-        private enum BoxFaceType
-        {
-            Unknown,
-            XMin,
-            XMax,
-            YMin,
-            YMax,
-            ZMin,
-            ZMax
-        }
-
         public Toplet3DCommand()
         {
             Instance = this;
@@ -42,7 +31,7 @@ namespace Toplet_v0_Alpha
 
         public static Toplet3DCommand Instance { get; private set; }
 
-        public override string EnglishName => "TopletTopOpt3D";
+        public override string EnglishName => "Toplet3D";
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
@@ -96,9 +85,9 @@ namespace Toplet_v0_Alpha
 
             double cellSize = 1.0;
 
-            int maxElementsX = 20;
-            int maxElementsY = 20;
-            int maxElementsZ = 20;
+            int maxElementsX = 50;
+            int maxElementsY = 10;
+            int maxElementsZ = 50;
 
             if (width / cellSize > maxElementsX ||
                 depth / cellSize > maxElementsY ||
@@ -125,8 +114,8 @@ namespace Toplet_v0_Alpha
                 NelZ = nelz,
                 VolumeFraction = 0.5,
                 Penal = 3.0,
-                FilterRadius = 1.5,
-                MaxIterations = 30
+                FilterRadius = 1.0,
+                MaxIterations = 15
             };
 
             int nnx = nelx + 1;
@@ -135,71 +124,101 @@ namespace Toplet_v0_Alpha
             int nodeCount = nnx * nny * nnz;
             int dofCount = nodeCount * 3;
 
-            if (dofCount > 12000)
+            int maxDofs = 300000;
+
+            if (dofCount > maxDofs)
             {
-                RhinoApp.WriteLine("Grid is too large for the current dense 3D solver.");
-                RhinoApp.WriteLine("Try a larger cell size or a smaller solid.");
+                RhinoApp.WriteLine("Grid is too large for the current 3D solver setup.");
+                RhinoApp.WriteLine("Reduce element count or use a smaller solid.");
                 RhinoApp.WriteLine("Current DOF count: {0}", dofCount);
+                RhinoApp.WriteLine("Current soft limit: {0}", maxDofs);
                 return Result.Failure;
             }
 
-            bool[,,] designMask = new bool[nelx, nely, nelz];
-            for (int ex = 0; ex < nelx; ex++)
+            double tol = Math.Max(doc.ModelAbsoluteTolerance, cellSize * 0.35);
+
+            bool[,,] rawMask = VoxelDomainBuilder3D.BuildMaskFromBrep(
+                brep,
+                bbox,
+                nelx,
+                nely,
+                nelz,
+                dx,
+                dy,
+                dz,
+                tol);
+
+            int rawActiveCount = VoxelDomainBuilder3D.CountActiveElements(rawMask, nelx, nely, nelz);
+            if (rawActiveCount == 0)
             {
-                for (int ey = 0; ey < nely; ey++)
-                {
-                    for (int ez = 0; ez < nelz; ez++)
-                    {
-                        designMask[ex, ey, ez] = true;
-                    }
-                }
+                RhinoApp.WriteLine("No active voxels found inside the selected Brep.");
+                return Result.Failure;
             }
 
             double[] forces = new double[dofCount];
             bool[] fixedDofs = new bool[dofCount];
 
-            double tol = Math.Max(doc.ModelAbsoluteTolerance, cellSize * 0.25);
+            HashSet<int> supportNodes = new HashSet<int>();
 
-            rc = BuildLoad(
-                doc,
+            rc = BuildSupports(
                 brepRef.ObjectId,
-                bbox,
-                loadMode,
-                nelx,
-                nely,
-                nelz,
-                dx,
-                dy,
-                dz,
+                supportMode,
                 minX,
                 minY,
                 minZ,
+                dx,
+                dy,
+                dz,
+                nelx,
+                nely,
+                nelz,
                 nny,
                 nnz,
+                fixedDofs,
+                bbox,
                 tol,
-                forces);
+                supportNodes);
 
             if (rc != Result.Success)
                 return rc;
 
-            rc = BuildSupports(
-                doc,
-                brepRef.ObjectId,
+            bool[,,] designMask = MaskConnectivity3D.ExtractSupportConnectedMask(
+                rawMask,
+                supportNodes,
                 bbox,
-                supportMode,
                 nelx,
                 nely,
                 nelz,
-                dx,
-                dy,
-                dz,
+                nny,
+                nnz);
+
+            int connectedActiveCount = VoxelDomainBuilder3D.CountActiveElements(designMask, nelx, nely, nelz);
+            if (connectedActiveCount == 0)
+            {
+                RhinoApp.WriteLine("No support-connected active voxels remain.");
+                return Result.Failure;
+            }
+
+            HashSet<int> activeNodes = BuildActiveNodeSet(designMask, nelx, nely, nelz, nny, nnz);
+
+            rc = BuildLoad(
+                brepRef.ObjectId,
+                loadMode,
                 minX,
                 minY,
                 minZ,
+                dx,
+                dy,
+                dz,
+                nelx,
+                nely,
+                nelz,
                 nny,
                 nnz,
+                forces,
+                bbox,
                 tol,
-                fixedDofs);
+                activeNodes);
 
             if (rc != Result.Success)
                 return rc;
@@ -207,8 +226,12 @@ namespace Toplet_v0_Alpha
             RhinoApp.WriteLine("Grid: {0} x {1} x {2}", nelx, nely, nelz);
             RhinoApp.WriteLine("Cell size used: {0}", cellSize);
             RhinoApp.WriteLine("DOF count: {0}", dofCount);
+            RhinoApp.WriteLine("Raw active voxels: {0}", rawActiveCount);
+            RhinoApp.WriteLine("Support-connected active voxels: {0}", connectedActiveCount);
+            RhinoApp.WriteLine("Active node count: {0}", activeNodes.Count);
             RhinoApp.WriteLine("Load mode: {0}", loadMode);
             RhinoApp.WriteLine("Support mode: {0}", supportMode);
+            RhinoApp.WriteLine("Support node count: {0}", supportNodes.Count);
 
             TopOptDomain3D domain = new TopOptDomain3D
             {
@@ -220,8 +243,20 @@ namespace Toplet_v0_Alpha
             TopOptResult3D result;
             try
             {
-                TopOptSolver3D solver = new TopOptSolver3D();
-                result = solver.Solve(problem, domain);
+                int denseDofLimit = 12000;
+
+                if (dofCount <= denseDofLimit)
+                {
+                    RhinoApp.WriteLine("Solver backend: Dense");
+                    TopOptSolver3D solver = new TopOptSolver3D();
+                    result = solver.Solve(problem, domain);
+                }
+                else
+                {
+                    RhinoApp.WriteLine("Solver backend: Sparse");
+                    TopOptSolver3DSparse solver = new TopOptSolver3DSparse();
+                    result = solver.Solve(problem, domain);
+                }
             }
             catch (Exception ex)
             {
@@ -236,12 +271,13 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            Visualization3D.AddDensityVoxelsToDocument(
+            Visualization3D.AddDensityMeshToDocument(
                 doc,
                 result,
                 bbox,
                 0.3,
-                "Toplet3D_Result");
+                "Toplet3D_Result",
+                designMask);
 
             RhinoApp.WriteLine("TopOpt3D completed.");
             RhinoApp.WriteLine("Iterations: {0}", result.Iterations);
@@ -261,16 +297,12 @@ namespace Toplet_v0_Alpha
             int supportPointsOpt = go.AddOption("SupportPoints");
             int supportFacesOpt = go.AddOption("SupportFaces");
             go.AcceptNothing(true);
-            go.SetCommandPrompt("Choose boundary condition modes. Press Enter to accept current modes");
 
             while (true)
             {
-                string current = string.Format(
-                    "Current: Load={0}, Supports={1}",
-                    loadMode,
-                    supportMode);
-
-                go.SetCommandPrompt("Choose boundary condition modes. " + current);
+                go.SetCommandPrompt(
+                    string.Format("Choose boundary condition modes. Current: Load={0}, Supports={1}. Press Enter to accept",
+                    loadMode, supportMode));
 
                 GetResult gr = go.Get();
 
@@ -289,28 +321,28 @@ namespace Toplet_v0_Alpha
         }
 
         private static Result BuildLoad(
-            RhinoDoc doc,
             Guid parentBrepId,
-            BoundingBox bbox,
             LoadInputMode loadMode,
-            int nelx,
-            int nely,
-            int nelz,
-            double dx,
-            double dy,
-            double dz,
             double minX,
             double minY,
             double minZ,
+            double dx,
+            double dy,
+            double dz,
+            int nelx,
+            int nely,
+            int nelz,
             int nny,
             int nnz,
+            double[] forces,
+            BoundingBox bbox,
             double tol,
-            double[] forces)
+            HashSet<int> activeNodes)
         {
             if (loadMode == LoadInputMode.Point)
-                return BuildPointLoad(minX, minY, minZ, dx, dy, dz, nelx, nely, nelz, nny, nnz, forces);
+                return BuildPointLoad(minX, minY, minZ, dx, dy, dz, nelx, nely, nelz, nny, nnz, forces, activeNodes);
 
-            return BuildFaceLoad(parentBrepId, bbox, nelx, nely, nelz, nny, nnz, tol, forces);
+            return BuildFaceLoad(parentBrepId, bbox, nelx, nely, nelz, nny, nnz, tol, forces, activeNodes);
         }
 
         private static Result BuildPointLoad(
@@ -325,7 +357,8 @@ namespace Toplet_v0_Alpha
             int nelz,
             int nny,
             int nnz,
-            double[] forces)
+            double[] forces,
+            HashSet<int> activeNodes)
         {
             GetPoint gp = new GetPoint();
             gp.SetCommandPrompt("Pick load point (global -Z point load)");
@@ -341,6 +374,13 @@ namespace Toplet_v0_Alpha
             int iz = ClampIndex((int)Math.Round((pt.Z - minZ) / dz), 0, nelz);
 
             int node = NodeIndex(ix, iy, iz, nny, nnz);
+
+            if (!activeNodes.Contains(node))
+            {
+                RhinoApp.WriteLine("Selected load point mapped to a node that is not on the active support-connected structure.");
+                return Result.Failure;
+            }
+
             forces[3 * node + 2] = -1.0;
 
             RhinoApp.WriteLine("Point load node ijk: ({0}, {1}, {2})", ix, iy, iz);
@@ -356,9 +396,10 @@ namespace Toplet_v0_Alpha
             int nny,
             int nnz,
             double tol,
-            double[] forces)
+            double[] forces,
+            HashSet<int> activeNodes)
         {
-            ObjRef faceRef = GetSingleFaceFromBrep("Select ONE load face", parentBrepId);
+            ObjRef faceRef = GetSingleFaceFromBrep("Select ONE load face (Ctrl+Shift-click a face)", parentBrepId);
             if (faceRef == null)
                 return Result.Cancel;
 
@@ -369,59 +410,48 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            BoxFaceType faceType = GetBoxFaceType(face, bbox, tol);
-            if (faceType == BoxFaceType.Unknown)
-            {
-                RhinoApp.WriteLine("Load face must lie on a bounding-box side of the selected solid.");
-                return Result.Failure;
-            }
+            List<int> candidateNodes = GetNodesNearFace(face, bbox, nelx, nely, nelz, nny, nnz, tol);
+            List<int> nodes = FilterNodesToActive(candidateNodes, activeNodes);
 
-            List<int> nodes = GetNodesOnFace(faceType, nelx, nely, nelz, nny, nnz);
+            RhinoApp.WriteLine("Load face candidate node count: {0}", candidateNodes.Count);
+            RhinoApp.WriteLine("Load face active node count: {0}", nodes.Count);
+
             if (nodes.Count == 0)
             {
-                RhinoApp.WriteLine("No FE nodes found on the selected load face.");
+                RhinoApp.WriteLine("No active FE nodes found near the selected load face.");
+                RhinoApp.WriteLine("This usually means the face is not connected to the support-connected voxel structure at the current resolution.");
                 return Result.Failure;
             }
 
-            Vector3d normal = GetFaceNormal(face);
-            if (!normal.Unitize())
-            {
-                RhinoApp.WriteLine("Could not compute a valid load face normal.");
-                return Result.Failure;
-            }
+            ApplyDistributedFaceLoad(forces, nodes, face, bbox, nelx, nely, nelz, nny, nnz, 1.0);
 
-            ApplyDistributedFaceLoad(forces, nodes, normal, 1.0);
-
-            RhinoApp.WriteLine("Load face type: {0}", faceType);
             RhinoApp.WriteLine("Load face node count: {0}", nodes.Count);
-            RhinoApp.WriteLine("Load normal: ({0:F3}, {1:F3}, {2:F3})", normal.X, normal.Y, normal.Z);
-
             return Result.Success;
         }
 
         private static Result BuildSupports(
-            RhinoDoc doc,
             Guid parentBrepId,
-            BoundingBox bbox,
             SupportInputMode supportMode,
-            int nelx,
-            int nely,
-            int nelz,
-            double dx,
-            double dy,
-            double dz,
             double minX,
             double minY,
             double minZ,
+            double dx,
+            double dy,
+            double dz,
+            int nelx,
+            int nely,
+            int nelz,
             int nny,
             int nnz,
+            bool[] fixedDofs,
+            BoundingBox bbox,
             double tol,
-            bool[] fixedDofs)
+            HashSet<int> supportNodes)
         {
             if (supportMode == SupportInputMode.Points)
-                return BuildPointSupports(minX, minY, minZ, dx, dy, dz, nelx, nely, nelz, nny, nnz, fixedDofs);
+                return BuildPointSupports(minX, minY, minZ, dx, dy, dz, nelx, nely, nelz, nny, nnz, fixedDofs, supportNodes);
 
-            return BuildFaceSupports(parentBrepId, bbox, nelx, nely, nelz, nny, nnz, tol, fixedDofs);
+            return BuildFaceSupports(parentBrepId, bbox, nelx, nely, nelz, nny, nnz, tol, fixedDofs, supportNodes);
         }
 
         private static Result BuildPointSupports(
@@ -436,7 +466,8 @@ namespace Toplet_v0_Alpha
             int nelz,
             int nny,
             int nnz,
-            bool[] fixedDofs)
+            bool[] fixedDofs,
+            HashSet<int> supportNodes)
         {
             List<Point3d> supportPoints = new List<Point3d>();
 
@@ -454,12 +485,7 @@ namespace Toplet_v0_Alpha
                 if (gr != GetResult.Point)
                     return Result.Cancel;
 
-                Point3d pt = gp.Point();
-                supportPoints.Add(pt);
-
-                RhinoApp.WriteLine(
-                    "Support point added: ({0:F3}, {1:F3}, {2:F3})",
-                    pt.X, pt.Y, pt.Z);
+                supportPoints.Add(gp.Point());
             }
 
             if (supportPoints.Count == 0)
@@ -468,21 +494,16 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            HashSet<int> nodes = new HashSet<int>();
-
             foreach (Point3d pt in supportPoints)
             {
                 int ix = ClampIndex((int)Math.Round((pt.X - minX) / dx), 0, nelx);
                 int iy = ClampIndex((int)Math.Round((pt.Y - minY) / dy), 0, nely);
                 int iz = ClampIndex((int)Math.Round((pt.Z - minZ) / dz), 0, nelz);
 
-                int node = NodeIndex(ix, iy, iz, nny, nnz);
-                nodes.Add(node);
+                supportNodes.Add(NodeIndex(ix, iy, iz, nny, nnz));
             }
 
-            ApplyFixedFaceSupports(fixedDofs, nodes);
-            RhinoApp.WriteLine("Support point node count: {0}", nodes.Count);
-
+            ApplyFixedNodes(fixedDofs, supportNodes);
             return Result.Success;
         }
 
@@ -495,10 +516,11 @@ namespace Toplet_v0_Alpha
             int nny,
             int nnz,
             double tol,
-            bool[] fixedDofs)
+            bool[] fixedDofs,
+            HashSet<int> supportNodes)
         {
             ObjRef[] faceRefs = GetMultipleFacesFromBrep(
-                "Select ONE OR MORE support faces. Press Enter when done",
+                "Select ONE OR MORE support faces (Ctrl+Shift-click faces, Enter when done)",
                 parentBrepId);
 
             if (faceRefs == null || faceRefs.Length == 0)
@@ -507,35 +529,24 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            HashSet<int> supportNodeSet = new HashSet<int>();
-
             for (int i = 0; i < faceRefs.Length; i++)
             {
                 BrepFace face = faceRefs[i].Face();
                 if (face == null)
                     continue;
 
-                BoxFaceType faceType = GetBoxFaceType(face, bbox, tol);
-                if (faceType == BoxFaceType.Unknown)
-                {
-                    RhinoApp.WriteLine("A support face must lie on a bounding-box side of the selected solid.");
-                    return Result.Failure;
-                }
-
-                List<int> nodes = GetNodesOnFace(faceType, nelx, nely, nelz, nny, nnz);
-                for (int n = 0; n < nodes.Count; n++)
-                    supportNodeSet.Add(nodes[n]);
+                List<int> nodes = GetNodesNearFace(face, bbox, nelx, nely, nelz, nny, nnz, tol);
+                for (int j = 0; j < nodes.Count; j++)
+                    supportNodes.Add(nodes[j]);
             }
 
-            if (supportNodeSet.Count == 0)
+            if (supportNodes.Count == 0)
             {
-                RhinoApp.WriteLine("No FE nodes found on selected support faces.");
+                RhinoApp.WriteLine("No FE nodes found near selected support faces.");
                 return Result.Failure;
             }
 
-            ApplyFixedFaceSupports(fixedDofs, supportNodeSet);
-            RhinoApp.WriteLine("Support face node count: {0}", supportNodeSet.Count);
-
+            ApplyFixedNodes(fixedDofs, supportNodes);
             return Result.Success;
         }
 
@@ -544,6 +555,7 @@ namespace Toplet_v0_Alpha
             GetObject go = new GetObject();
             go.SetCommandPrompt(prompt);
             go.GeometryFilter = ObjectType.Surface;
+            go.GeometryAttributeFilter = GeometryAttributeFilter.SubSurface;
             go.SubObjectSelect = true;
             go.EnablePreSelect(false, true);
             go.DeselectAllBeforePostSelect = false;
@@ -576,6 +588,7 @@ namespace Toplet_v0_Alpha
             GetObject go = new GetObject();
             go.SetCommandPrompt(prompt);
             go.GeometryFilter = ObjectType.Surface;
+            go.GeometryAttributeFilter = GeometryAttributeFilter.SubSurface;
             go.SubObjectSelect = true;
             go.AcceptNothing(true);
             go.EnablePreSelect(false, true);
@@ -595,13 +608,13 @@ namespace Toplet_v0_Alpha
 
                 if (faceRef.ObjectId != parentBrepId)
                 {
-                    RhinoApp.WriteLine("All support faces must belong to the selected solid.");
+                    RhinoApp.WriteLine("All selected faces must belong to the selected solid.");
                     return null;
                 }
 
                 if (faceRef.Face() == null)
                 {
-                    RhinoApp.WriteLine("Support selection must contain Brep faces only.");
+                    RhinoApp.WriteLine("Selection must contain Brep faces only.");
                     return null;
                 }
 
@@ -611,130 +624,183 @@ namespace Toplet_v0_Alpha
             return refs.ToArray();
         }
 
-        private static BoxFaceType GetBoxFaceType(BrepFace face, BoundingBox bbox, double tol)
+        private static List<int> GetNodesNearFace(
+            BrepFace face,
+            BoundingBox bbox,
+            int nelx,
+            int nely,
+            int nelz,
+            int nny,
+            int nnz,
+            double tol)
         {
-            BoundingBox fb = face.GetBoundingBox(true);
+            List<int> nodes = new List<int>();
 
-            bool atXMin = Math.Abs(fb.Min.X - bbox.Min.X) <= tol && Math.Abs(fb.Max.X - bbox.Min.X) <= tol;
-            bool atXMax = Math.Abs(fb.Min.X - bbox.Max.X) <= tol && Math.Abs(fb.Max.X - bbox.Max.X) <= tol;
+            double dx = bbox.Diagonal.X / nelx;
+            double dy = bbox.Diagonal.Y / nely;
+            double dz = bbox.Diagonal.Z / nelz;
 
-            bool atYMin = Math.Abs(fb.Min.Y - bbox.Min.Y) <= tol && Math.Abs(fb.Max.Y - bbox.Min.Y) <= tol;
-            bool atYMax = Math.Abs(fb.Min.Y - bbox.Max.Y) <= tol && Math.Abs(fb.Max.Y - bbox.Max.Y) <= tol;
+            double nodeTol = Math.Max(tol, 0.30 * Math.Min(dx, Math.Min(dy, dz)));
 
-            bool atZMin = Math.Abs(fb.Min.Z - bbox.Min.Z) <= tol && Math.Abs(fb.Max.Z - bbox.Min.Z) <= tol;
-            bool atZMax = Math.Abs(fb.Min.Z - bbox.Max.Z) <= tol && Math.Abs(fb.Max.Z - bbox.Max.Z) <= tol;
+            for (int ix = 0; ix <= nelx; ix++)
+            {
+                for (int iy = 0; iy <= nely; iy++)
+                {
+                    for (int iz = 0; iz <= nelz; iz++)
+                    {
+                        Point3d p = new Point3d(
+                            bbox.Min.X + ix * dx,
+                            bbox.Min.Y + iy * dy,
+                            bbox.Min.Z + iz * dz);
 
-            if (atXMin) return BoxFaceType.XMin;
-            if (atXMax) return BoxFaceType.XMax;
-            if (atYMin) return BoxFaceType.YMin;
-            if (atYMax) return BoxFaceType.YMax;
-            if (atZMin) return BoxFaceType.ZMin;
-            if (atZMax) return BoxFaceType.ZMax;
+                        double u, v;
+                        if (!face.ClosestPoint(p, out u, out v))
+                            continue;
 
-            return BoxFaceType.Unknown;
+                        Point3d q = face.PointAt(u, v);
+                        if (p.DistanceTo(q) <= nodeTol)
+                            nodes.Add(NodeIndex(ix, iy, iz, nny, nnz));
+                    }
+                }
+            }
+
+            return nodes;
         }
 
-        private static List<int> GetNodesOnFace(
-            BoxFaceType faceType,
+        private static HashSet<int> BuildActiveNodeSet(
+            bool[,,] mask,
             int nelx,
             int nely,
             int nelz,
             int nny,
             int nnz)
         {
-            List<int> nodes = new List<int>();
+            HashSet<int> activeNodes = new HashSet<int>();
 
-            switch (faceType)
+            for (int ex = 0; ex < nelx; ex++)
             {
-                case BoxFaceType.XMin:
-                    for (int iy = 0; iy <= nely; iy++)
-                        for (int iz = 0; iz <= nelz; iz++)
-                            nodes.Add(NodeIndex(0, iy, iz, nny, nnz));
-                    break;
+                for (int ey = 0; ey < nely; ey++)
+                {
+                    for (int ez = 0; ez < nelz; ez++)
+                    {
+                        if (!mask[ex, ey, ez])
+                            continue;
 
-                case BoxFaceType.XMax:
-                    for (int iy = 0; iy <= nely; iy++)
-                        for (int iz = 0; iz <= nelz; iz++)
-                            nodes.Add(NodeIndex(nelx, iy, iz, nny, nnz));
-                    break;
-
-                case BoxFaceType.YMin:
-                    for (int ix = 0; ix <= nelx; ix++)
-                        for (int iz = 0; iz <= nelz; iz++)
-                            nodes.Add(NodeIndex(ix, 0, iz, nny, nnz));
-                    break;
-
-                case BoxFaceType.YMax:
-                    for (int ix = 0; ix <= nelx; ix++)
-                        for (int iz = 0; iz <= nelz; iz++)
-                            nodes.Add(NodeIndex(ix, nely, iz, nny, nnz));
-                    break;
-
-                case BoxFaceType.ZMin:
-                    for (int ix = 0; ix <= nelx; ix++)
-                        for (int iy = 0; iy <= nely; iy++)
-                            nodes.Add(NodeIndex(ix, iy, 0, nny, nnz));
-                    break;
-
-                case BoxFaceType.ZMax:
-                    for (int ix = 0; ix <= nelx; ix++)
-                        for (int iy = 0; iy <= nely; iy++)
-                            nodes.Add(NodeIndex(ix, iy, nelz, nny, nnz));
-                    break;
+                        activeNodes.Add(NodeIndex(ex, ey, ez, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex + 1, ey, ez, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex + 1, ey + 1, ez, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex, ey + 1, ez, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex, ey, ez + 1, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex + 1, ey, ez + 1, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex + 1, ey + 1, ez + 1, nny, nnz));
+                        activeNodes.Add(NodeIndex(ex, ey + 1, ez + 1, nny, nnz));
+                    }
+                }
             }
 
-            return nodes;
+            return activeNodes;
         }
 
-        private static Vector3d GetFaceNormal(BrepFace face)
+        private static List<int> FilterNodesToActive(IEnumerable<int> nodes, HashSet<int> activeNodes)
         {
-            Interval du = face.Domain(0);
-            Interval dv = face.Domain(1);
+            List<int> filtered = new List<int>();
 
-            double u = 0.5 * (du.T0 + du.T1);
-            double v = 0.5 * (dv.T0 + dv.T1);
+            foreach (int node in nodes)
+            {
+                if (activeNodes.Contains(node))
+                    filtered.Add(node);
+            }
 
-            Vector3d normal = face.NormalAt(u, v);
-            if (face.OrientationIsReversed)
-                normal.Reverse();
-
-            normal.Unitize();
-            return normal;
+            return filtered;
         }
 
         private static void ApplyDistributedFaceLoad(
             double[] forces,
             List<int> nodes,
-            Vector3d normal,
+            BrepFace face,
+            BoundingBox bbox,
+            int nelx,
+            int nely,
+            int nelz,
+            int nny,
+            int nnz,
             double totalLoadMagnitude)
         {
-            if (forces == null || nodes == null || nodes.Count == 0)
+            if (forces == null || nodes == null || nodes.Count == 0 || face == null)
                 return;
 
-            double fx = totalLoadMagnitude * normal.X / nodes.Count;
-            double fy = totalLoadMagnitude * normal.Y / nodes.Count;
-            double fz = totalLoadMagnitude * normal.Z / nodes.Count;
+            double dx = bbox.Diagonal.X / nelx;
+            double dy = bbox.Diagonal.Y / nely;
+            double dz = bbox.Diagonal.Z / nelz;
 
-            for (int i = 0; i < nodes.Count; i++)
+            Vector3d avg = Vector3d.Zero;
+
+            foreach (int node in nodes)
             {
-                int node = nodes[i];
+                Point3d p = NodePoint(node, bbox, nny, nnz, dx, dy, dz);
+
+                double u, v;
+                if (!face.ClosestPoint(p, out u, out v))
+                    continue;
+
+                Vector3d n = face.NormalAt(u, v);
+                if (face.OrientationIsReversed)
+                    n.Reverse();
+
+                if (n.Unitize())
+                    avg += n;
+            }
+
+            if (!avg.Unitize())
+            {
+                Interval du = face.Domain(0);
+                Interval dv = face.Domain(1);
+                avg = face.NormalAt(0.5 * (du.T0 + du.T1), 0.5 * (dv.T0 + dv.T1));
+                if (face.OrientationIsReversed)
+                    avg.Reverse();
+                avg.Unitize();
+            }
+
+            double fx = totalLoadMagnitude * avg.X / nodes.Count;
+            double fy = totalLoadMagnitude * avg.Y / nodes.Count;
+            double fz = totalLoadMagnitude * avg.Z / nodes.Count;
+
+            foreach (int node in nodes)
+            {
                 forces[3 * node] += fx;
                 forces[3 * node + 1] += fy;
                 forces[3 * node + 2] += fz;
             }
         }
 
-        private static void ApplyFixedFaceSupports(bool[] fixedDofs, IEnumerable<int> nodes)
+        private static void ApplyFixedNodes(bool[] fixedDofs, IEnumerable<int> nodes)
         {
-            if (fixedDofs == null || nodes == null)
-                return;
-
             foreach (int node in nodes)
             {
                 fixedDofs[3 * node] = true;
                 fixedDofs[3 * node + 1] = true;
                 fixedDofs[3 * node + 2] = true;
             }
+        }
+
+        private static Point3d NodePoint(
+            int node,
+            BoundingBox bbox,
+            int nny,
+            int nnz,
+            double dx,
+            double dy,
+            double dz)
+        {
+            int ix = node / (nny * nnz);
+            int rem = node % (nny * nnz);
+            int iy = rem / nnz;
+            int iz = rem % nnz;
+
+            return new Point3d(
+                bbox.Min.X + ix * dx,
+                bbox.Min.Y + iy * dy,
+                bbox.Min.Z + iz * dz);
         }
 
         private static int ClampIndex(int value, int min, int max)

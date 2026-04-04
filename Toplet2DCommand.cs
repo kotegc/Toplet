@@ -21,7 +21,7 @@ namespace Toplet_v0_Alpha
 
         public static Toplet2DCommand Instance { get; private set; }
 
-        public override string EnglishName => "TopletTopOpt2D";
+        public override string EnglishName => "Toplet2D";
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
