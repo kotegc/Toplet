@@ -1,6 +1,6 @@
-namespace Anemone_V1_Alpha.TopOpt
+namespace Toplet_v0_Alpha.TopOpt2D
 {
-    public class TopOptResult
+    public class TopOptResult2D
     {
         public int NelX { get; set; }
         public int NelY { get; set; }

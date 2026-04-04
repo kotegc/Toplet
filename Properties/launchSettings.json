@@ -19,7 +19,7 @@
     "Rhino 7": {
       "commandName": "Executable",
       "executablePath": "C:\\Program Files\\Rhino 7\\System\\Rhino.exe",
-      "commandLineArgs": "\"$(ProjectDir)bin\\Debug\\net48\\Anemone_V1_Alpha.rhp\""
+      "commandLineArgs": "\"$(ProjectDir)bin\\Debug\\net48\\Toplet_v0_Alpha.rhp\""
     }
   }
 }

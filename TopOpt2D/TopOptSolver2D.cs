@@ -1,11 +1,11 @@
 using System;
 using System.Collections.Generic;
 
-namespace Anemone_V1_Alpha.TopOpt
+namespace Toplet_v0_Alpha.TopOpt2D
 {
-    public class TopOptSolver
+    public class TopOptSolver2D
     {
-        public TopOptResult Solve(TopOptProblem problem, TopOptDomain domain)
+        public TopOptResult2D Solve(TopOptProblem2D problem, TopOptDomain2D domain)
         {
             if (problem == null)
                 throw new ArgumentNullException(nameof(problem));
@@ -133,7 +133,7 @@ namespace Anemone_V1_Alpha.TopOpt
 
                 if (change < 0.01 && iter > 10)
                 {
-                    return new TopOptResult
+                    return new TopOptResult2D
                     {
                         NelX = nelx,
                         NelY = nely,
@@ -144,7 +144,7 @@ namespace Anemone_V1_Alpha.TopOpt
                 }
             }
 
-            return new TopOptResult
+            return new TopOptResult2D
             {
                 NelX = nelx,
                 NelY = nely,
@@ -154,7 +154,7 @@ namespace Anemone_V1_Alpha.TopOpt
             };
         }
 
-        private static void ValidateInputs(TopOptProblem problem, TopOptDomain domain, int dofCount)
+        private static void ValidateInputs(TopOptProblem2D problem, TopOptDomain2D domain, int dofCount)
         {
             if (domain.DesignMask == null)
                 throw new ArgumentException("DesignMask cannot be null.");

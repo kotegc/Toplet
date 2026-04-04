@@ -1,6 +1,6 @@
-namespace Anemone_V1_Alpha.TopOpt
+namespace Toplet_v0_Alpha.TopOpt2D
 {
-    public class TopOptDomain
+    public class TopOptDomain2D
     {
         // One bool per element/cell in the design grid.
         // true = this element is part of the design domain

@@ -1,7 +1,7 @@
 ﻿using Rhino;
 using System;
 
-namespace Anemone_V1_Alpha
+namespace Toplet_v0_Alpha
 {
     ///<summary>
     /// <para>Every RhinoCommon .rhp assembly must have one and only one PlugIn-derived
@@ -11,15 +11,15 @@ namespace Anemone_V1_Alpha
     /// attributes in AssemblyInfo.cs (you might need to click "Project" ->
     /// "Show All Files" to see it in the "Solution Explorer" window).</para>
     ///</summary>
-    public class AnemonePlugin : Rhino.PlugIns.PlugIn
+    public class TopletPlugin : Rhino.PlugIns.PlugIn
     {
-        public AnemonePlugin()
+        public TopletPlugin()
         {
             Instance = this;
         }
 
-        ///<summary>Gets the only instance of the AnemonePlugin plug-in.</summary>
-        public static AnemonePlugin Instance { get; private set; }
+        ///<summary>Gets the only instance of the TopletPlugin plug-in.</summary>
+        public static TopletPlugin Instance { get; private set; }
 
         // You can override methods here to change the plug-in behavior on
         // loading and shut down, add options pages to the Rhino _Option command

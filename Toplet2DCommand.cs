@@ -1,4 +1,4 @@
-﻿using Anemone_V1_Alpha.TopOpt;
+﻿using Toplet_v0_Alpha.TopOpt2D;
 using Eto.Forms;
 using Rhino;
 using Rhino.Commands;
@@ -10,18 +10,18 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace Anemone_V1_Alpha
+namespace Toplet_v0_Alpha
 {
-    public class AnemoneCommand : Rhino.Commands.Command
+    public class Toplet2DCommand : Rhino.Commands.Command
     {
-        public AnemoneCommand()
+        public Toplet2DCommand()
         {
             Instance = this;
         }
 
-        public static AnemoneCommand Instance { get; private set; }
+        public static Toplet2DCommand Instance { get; private set; }
 
-        public override string EnglishName => "AnemoneTopOpt2D";
+        public override string EnglishName => "TopletTopOpt2D";
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
@@ -83,7 +83,7 @@ namespace Anemone_V1_Alpha
             double dy = cellSize;
 
             // 3. Build optimization problem using the computed grid size
-            var problem = new TopOptProblem
+            var problem = new TopOptProblem2D
             {
                 NelX = nelx,
                 NelY = nely,
@@ -251,15 +251,15 @@ namespace Anemone_V1_Alpha
             RhinoApp.WriteLine("Load column: {0}, load row: {1}", rightActiveColumn, targetRow);
 
             // 7. Solve
-            TopOptDomain domain = new TopOptDomain
+            TopOptDomain2D domain = new TopOptDomain2D
             {
                 DesignMask = designMask,
                 Forces = forces,
                 FixedDofs = fixedDofs
             };
 
-            TopOptSolver solver = new TopOptSolver();
-            TopOptResult result = solver.Solve(problem, domain);
+            TopOptSolver2D solver = new TopOptSolver2D();
+            TopOptResult2D result = solver.Solve(problem, domain);
 
             if (result == null || result.Density == null)
             {
@@ -346,7 +346,7 @@ namespace Anemone_V1_Alpha
 
             return connected;
         }
-        private void ShowDensityBitmap(TopOptResult result, int scale, double threshold)
+        private void ShowDensityBitmap(TopOptResult2D result, int scale, double threshold)
         {
             int width = result.NelX;
             int height = result.NelY;
