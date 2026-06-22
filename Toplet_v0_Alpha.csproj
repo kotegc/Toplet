@@ -6,6 +6,7 @@
 		<TargetExt>.rhp</TargetExt>
 		<NoWarn>NU1701</NoWarn>
 		<UseWindowsForms>true</UseWindowsForms>
+		<LangVersion>latest</LangVersion>
 	</PropertyGroup>
 
 	<PropertyGroup>

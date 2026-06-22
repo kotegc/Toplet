@@ -1,4 +1,5 @@
 ﻿using Toplet_v0_Alpha.TopOpt3D;
+using Toplet_v0_Alpha.Interop;
 using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
@@ -24,6 +25,9 @@ namespace Toplet_v0_Alpha
             Faces
         }
 
+        private TopletDisplayConduit _activeConduit;
+        private ResultViewerForm     _activeViewer;
+
         public Toplet3DCommand()
         {
             Instance = this;
@@ -35,6 +39,10 @@ namespace Toplet_v0_Alpha
 
         protected override Result RunCommand(RhinoDoc doc, RunMode mode)
         {
+            // Close any viewer left open from a previous run
+            if (_activeViewer != null && !_activeViewer.IsDisposed) { _activeViewer.Close(); }
+            if (_activeConduit != null) { _activeConduit.Enabled = false; _activeConduit = null; }
+
             ObjRef brepRef;
             Result rc = RhinoGet.GetOneObject(
                 "Select closed solid for 3D design domain",
@@ -59,16 +67,9 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            double minX = bbox.Min.X;
-            double minY = bbox.Min.Y;
-            double minZ = bbox.Min.Z;
-            double maxX = bbox.Max.X;
-            double maxY = bbox.Max.Y;
-            double maxZ = bbox.Max.Z;
-
-            double width = maxX - minX;
-            double depth = maxY - minY;
-            double height = maxZ - minZ;
+            double width  = bbox.Max.X - bbox.Min.X;
+            double depth  = bbox.Max.Y - bbox.Min.Y;
+            double height = bbox.Max.Z - bbox.Min.Z;
 
             if (width <= 0.0 || depth <= 0.0 || height <= 0.0)
             {
@@ -99,13 +100,27 @@ namespace Toplet_v0_Alpha
                 cellSize = Math.Max(cellSizeX, Math.Max(cellSizeY, cellSizeZ));
             }
 
-            int nelx = Math.Max(1, (int)Math.Ceiling(width / cellSize));
-            int nely = Math.Max(1, (int)Math.Ceiling(depth / cellSize));
-            int nelz = Math.Max(1, (int)Math.Ceiling(height / cellSize));
+            // Round up to even so the brep centroid lands exactly on a cell boundary,
+            // giving identical left/right (and front/back) half-grids.
+            int nelx = Math.Max(2, (int)Math.Ceiling(width  / cellSize)); if (nelx % 2 != 0) nelx++;
+            int nely = Math.Max(2, (int)Math.Ceiling(depth  / cellSize)); if (nely % 2 != 0) nely++;
+            int nelz = Math.Max(2, (int)Math.Ceiling(height / cellSize)); if (nelz % 2 != 0) nelz++;
 
             double dx = cellSize;
             double dy = cellSize;
             double dz = cellSize;
+
+            // Centre the grid on the brep centroid.
+            double centX = (bbox.Min.X + bbox.Max.X) * 0.5;
+            double centY = (bbox.Min.Y + bbox.Max.Y) * 0.5;
+            double centZ = (bbox.Min.Z + bbox.Max.Z) * 0.5;
+            double startX = centX - (nelx * 0.5) * cellSize;
+            double startY = centY - (nely * 0.5) * cellSize;
+            double startZ = centZ - (nelz * 0.5) * cellSize;
+
+            BoundingBox gridBox = new BoundingBox(
+                new Point3d(startX, startY, startZ),
+                new Point3d(startX + nelx * cellSize, startY + nely * cellSize, startZ + nelz * cellSize));
 
             TopOptProblem3D problem = new TopOptProblem3D
             {
@@ -139,7 +154,7 @@ namespace Toplet_v0_Alpha
 
             bool[,,] rawMask = VoxelDomainBuilder3D.BuildMaskFromBrep(
                 brep,
-                bbox,
+                gridBox,
                 nelx,
                 nely,
                 nelz,
@@ -163,9 +178,9 @@ namespace Toplet_v0_Alpha
             rc = BuildSupports(
                 brepRef.ObjectId,
                 supportMode,
-                minX,
-                minY,
-                minZ,
+                startX,
+                startY,
+                startZ,
                 dx,
                 dy,
                 dz,
@@ -175,7 +190,7 @@ namespace Toplet_v0_Alpha
                 nny,
                 nnz,
                 fixedDofs,
-                bbox,
+                gridBox,
                 tol,
                 supportNodes);
 
@@ -204,9 +219,9 @@ namespace Toplet_v0_Alpha
             rc = BuildLoad(
                 brepRef.ObjectId,
                 loadMode,
-                minX,
-                minY,
-                minZ,
+                startX,
+                startY,
+                startZ,
                 dx,
                 dy,
                 dz,
@@ -216,7 +231,7 @@ namespace Toplet_v0_Alpha
                 nny,
                 nnz,
                 forces,
-                bbox,
+                gridBox,
                 tol,
                 activeNodes);
 
@@ -243,20 +258,8 @@ namespace Toplet_v0_Alpha
             TopOptResult3D result;
             try
             {
-                int denseDofLimit = 12000;
-
-                if (dofCount <= denseDofLimit)
-                {
-                    RhinoApp.WriteLine("Solver backend: Dense");
-                    TopOptSolver3D solver = new TopOptSolver3D();
-                    result = solver.Solve(problem, domain);
-                }
-                else
-                {
-                    RhinoApp.WriteLine("Solver backend: Sparse");
-                    TopOptSolver3DSparse solver = new TopOptSolver3DSparse();
-                    result = solver.Solve(problem, domain);
-                }
+                RhinoApp.WriteLine("Solver backend: Native C++ (Eigen)");
+                result = NativeSolver3D.Solve(problem, domain);
             }
             catch (Exception ex)
             {
@@ -271,15 +274,13 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            Visualization3D.AddDensityMeshToDocument(
-                doc,
-                result,
-                bbox,
-                0.3,
-                "Toplet3D_Result",
-                designMask);
+            _activeConduit = new TopletDisplayConduit(result, designMask, gridBox);
+            _activeConduit.Enabled = true;
 
-            RhinoApp.WriteLine("TopOpt3D completed.");
+            _activeViewer = new ResultViewerForm(_activeConduit, doc);
+            _activeViewer.Show();
+
+            RhinoApp.WriteLine("TopOpt3D completed — use the Result Viewer to explore and bake.");
             RhinoApp.WriteLine("Iterations: {0}", result.Iterations);
             RhinoApp.WriteLine("Final compliance: {0:F4}", result.Compliance);
 

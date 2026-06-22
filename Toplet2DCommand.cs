@@ -1,4 +1,5 @@
 ﻿using Toplet_v0_Alpha.TopOpt2D;
+using Toplet_v0_Alpha.Interop;
 using Eto.Forms;
 using Rhino;
 using Rhino.Commands;
@@ -75,12 +76,19 @@ namespace Toplet_v0_Alpha
                 cellSize = Math.Max(cellSizeX, cellSizeY);
             }
 
-            int nelx = Math.Max(1, (int)Math.Ceiling(width / cellSize));
-            int nely = Math.Max(1, (int)Math.Ceiling(height / cellSize));
+            // Round up to even so the curve centroid lands exactly on a cell boundary.
+            int nelx = Math.Max(2, (int)Math.Ceiling(width  / cellSize)); if (nelx % 2 != 0) nelx++;
+            int nely = Math.Max(2, (int)Math.Ceiling(height / cellSize)); if (nely % 2 != 0) nely++;
 
             // Square cells
             double dx = cellSize;
             double dy = cellSize;
+
+            // Centre the grid on the curve centroid.
+            double centX = (minX + maxX) * 0.5;
+            double centY = (minY + maxY) * 0.5;
+            double startX = centX - (nelx * 0.5) * cellSize;
+            double startY = centY - (nely * 0.5) * cellSize;
 
             // 3. Build optimization problem using the computed grid size
             var problem = new TopOptProblem2D
@@ -112,8 +120,8 @@ namespace Toplet_v0_Alpha
             {
                 for (int ey = 0; ey < nely; ey++)
                 {
-                    double cx = minX + (ex + 0.5) * dx;
-                    double cy = minY + (ey + 0.5) * dy;
+                    double cx = startX + (ex + 0.5) * dx;
+                    double cy = startY + (ey + 0.5) * dy;
 
                     Point3d pt = new Point3d(cx, cy, 0.0);
                     PointContainment containment = curve.Contains(pt, Plane.WorldXY, doc.ModelAbsoluteTolerance);
@@ -258,8 +266,7 @@ namespace Toplet_v0_Alpha
                 FixedDofs = fixedDofs
             };
 
-            TopOptSolver2D solver = new TopOptSolver2D();
-            TopOptResult2D result = solver.Solve(problem, domain);
+            TopOptResult2D result = NativeSolver2D.Solve(problem, domain);
 
             if (result == null || result.Density == null)
             {
