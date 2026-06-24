@@ -3,8 +3,15 @@
 #include <algorithm>
 
 #include "../include/Eigen/Sparse"
-#include "../include/Eigen/IterativeLinearSolvers"
 #include "../include/toplet_solver.h"
+
+#define AMGCL_NO_BOOST
+#include <amgcl/make_solver.hpp>
+#include <amgcl/backend/eigen.hpp>
+#include <amgcl/amg.hpp>
+#include <amgcl/coarsening/smoothed_aggregation.hpp>
+#include <amgcl/relaxation/spai0.hpp>
+#include <amgcl/solver/cg.hpp>
 
 // ---------------------------------------------------------------------------
 // Index helpers — match the C# node indexing formulas exactly
@@ -222,55 +229,112 @@ int solve_3d(
         std::vector<double> x_new(elem_count, 0.0);
         double compliance = 0.0;
 
+        // Count active elements once (mask never changes)
+        int active_count = 0;
+        for (int e = 0; e < elem_count; e++) if (mask_flat[e]) active_count++;
+
+        // ===================================================================
+        // Pre-build the sparsity pattern of Kff ONCE.
+        // The active set is fixed, so (row,col) pairs never change — only
+        // the values change as densities evolve.  We cache the position of
+        // each element (i,j) contribution in the compressed value array so
+        // each subsequent iteration can fill K with a single O(N) pass and
+        // zero memory allocation.
+        // ===================================================================
+        Eigen::SparseMatrix<double, Eigen::RowMajor> Kff(nfree, nfree);
+        {
+            typedef Eigen::Triplet<double> T;
+            std::vector<T> pat;
+            pat.reserve((size_t)active_count * 576);
+            for (int ex = 0; ex < nelx; ex++)
+            for (int ey = 0; ey < nely; ey++)
+            for (int ez = 0; ez < nelz; ez++) {
+                const int eidx = ex*nyz + ey*nelz + ez;
+                if (!mask_flat[eidx]) continue;
+                int edofs[24];
+                element_dofs(ex, ey, ez, nny, nnz, edofs);
+                for (int i = 0; i < 24; i++) {
+                    const int fi = dof_to_free[edofs[i]]; if (fi < 0) continue;
+                    for (int j = 0; j < 24; j++) {
+                        const int fj = dof_to_free[edofs[j]]; if (fj < 0) continue;
+                        pat.emplace_back(fi, fj, 0.0);
+                    }
+                }
+            }
+            Kff.setFromTriplets(pat.begin(), pat.end());
+        }
+        Kff.makeCompressed();
+
+        // Cache: for each active element, the list of (value-array-index, KE entry).
+        // Binary search on the compressed column to map (fi,fj) → valuePtr position.
+        struct KEntry { int vidx; double ke; };
+        std::vector<std::vector<KEntry>> elem_k(elem_count);
+        {
+            const int* outer = Kff.outerIndexPtr();
+            const int* inner = Kff.innerIndexPtr();
+            for (int ex = 0; ex < nelx; ex++)
+            for (int ey = 0; ey < nely; ey++)
+            for (int ez = 0; ez < nelz; ez++) {
+                const int eidx = ex*nyz + ey*nelz + ez;
+                if (!mask_flat[eidx]) continue;
+                int edofs[24];
+                element_dofs(ex, ey, ez, nny, nnz, edofs);
+                auto& ev = elem_k[eidx];
+                ev.reserve(576);
+                for (int i = 0; i < 24; i++) {
+                    const int fi = dof_to_free[edofs[i]]; if (fi < 0) continue;
+                    for (int j = 0; j < 24; j++) {
+                        const int fj = dof_to_free[edofs[j]]; if (fj < 0) continue;
+                        int lo = outer[fi], hi = outer[fi + 1];
+                        int pos = (int)(std::lower_bound(inner + lo, inner + hi, fj) - inner);
+                        ev.push_back({pos, KE[i][j]});
+                    }
+                }
+            }
+        }
+
+        // RHS is constant (forces don't change between iterations)
+        Eigen::VectorXd Ff(nfree);
+        for (int i = 0; i < nfree; i++) Ff(i) = forces[free_dofs[i]];
+
+        using AmgBackend = amgcl::backend::eigen<double>;
+        using AmgSolver = amgcl::make_solver<
+            amgcl::amg<
+                AmgBackend,
+                amgcl::coarsening::smoothed_aggregation,
+                amgcl::relaxation::spai0
+            >,
+            amgcl::solver::cg<AmgBackend>
+        >;
+        AmgSolver::params amg_prm;
+        amg_prm.solver.tol     = 1e-3;
+        amg_prm.solver.maxiter = 100;
+
+        Eigen::VectorXd Uf = Eigen::VectorXd::Zero(nfree);
+
         // ===================================================================
         // Main iteration loop
         // ===================================================================
         for (int iter = 0; iter < max_iter; iter++) {
 
-            // --- Assemble sparse global stiffness matrix (free DOFs only) ---
-            typedef Eigen::Triplet<double> T;
-            std::vector<T> triplets;
-            triplets.reserve(elem_count * 24);
+            // --- Fill Kff values directly (zero then accumulate) ---
+            double* kvals = Kff.valuePtr();
+            std::fill(kvals, kvals + Kff.nonZeros(), 0.0);
 
             for (int ex = 0; ex < nelx; ex++)
             for (int ey = 0; ey < nely; ey++)
             for (int ez = 0; ez < nelz; ez++) {
                 const int eidx = ex*nyz + ey*nelz + ez;
                 if (!mask_flat[eidx]) continue;
-
-                const double rho = x[eidx];
-                const double Ee  = Emin + std::pow(rho, penal) * (E0 - Emin);
-
-                int edofs[24];
-                element_dofs(ex, ey, ez, nny, nnz, edofs);
-
-                for (int i = 0; i < 24; i++) {
-                    const int fi = dof_to_free[edofs[i]];
-                    if (fi < 0) continue;
-                    for (int j = 0; j < 24; j++) {
-                        const int fj = dof_to_free[edofs[j]];
-                        if (fj < 0) continue;
-                        triplets.emplace_back(fi, fj, Ee * KE[i][j]);
-                    }
-                }
+                const double Ee = Emin + std::pow(x[eidx], penal) * (E0 - Emin);
+                for (const auto& e : elem_k[eidx])
+                    kvals[e.vidx] += Ee * e.ke;
             }
 
-            Eigen::SparseMatrix<double> Kff(nfree, nfree);
-            Kff.setFromTriplets(triplets.begin(), triplets.end());
-
-            // RHS force vector (free DOFs only)
-            Eigen::VectorXd Ff(nfree);
-            for (int i = 0; i < nfree; i++) Ff(i) = forces[free_dofs[i]];
-
-            // Solve Kff * Uf = Ff  (CG with diagonal / Jacobi preconditioner)
-            Eigen::ConjugateGradient<
-                Eigen::SparseMatrix<double>,
-                Eigen::Lower | Eigen::Upper
-            > cg;
-            cg.setMaxIterations(std::min(5000, nfree / 2 + 1000));
-            cg.setTolerance(1e-6);
-            cg.compute(Kff);
-            const Eigen::VectorXd Uf = cg.solve(Ff);
+            // --- Solve Kff * Uf = Ff (warm-started from previous step) ---
+            AmgSolver amg(Kff, amg_prm);
+            size_t amg_iters; double amg_error;
+            std::tie(amg_iters, amg_error) = amg(Ff, Uf);
 
             // Expand to full displacement vector
             Eigen::VectorXd U = Eigen::VectorXd::Zero(dof_count);
@@ -328,9 +392,6 @@ int solve_3d(
             }
 
             // --- OC density update with bisection for volume constraint ---
-            int active_count = 0;
-            for (int e = 0; e < elem_count; e++) if (mask_flat[e]) active_count++;
-
             const double target_vol = vol_frac * active_count;
             const double move = 0.2, xmin = 0.001;
             double l1 = 0.0, l2 = 1e9;

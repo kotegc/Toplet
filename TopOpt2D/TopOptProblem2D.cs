@@ -10,7 +10,7 @@ namespace Toplet_v0_Alpha.TopOpt2D
         public int MaxIterations { get; set; }
 
         public double YoungsModulusSolid { get; set; } = 1.0;
-        public double YoungsModulusMin { get; set; } = 1e-9;
+        public double YoungsModulusMin { get; set; } = 1e-3;
         public double PoissonRatio { get; set; } = 0.3;
     }
 }

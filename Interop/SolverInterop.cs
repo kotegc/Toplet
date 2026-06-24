@@ -83,6 +83,7 @@ namespace Toplet_v0_Alpha.Interop
             int rc = 0;
             Exception thrownEx = null;
             var sw = new Stopwatch();
+            bool wasCancelled3d = false;
 
             using (var progressForm = new SolverProgressForm(problem.MaxIterations))
             {
@@ -119,8 +120,10 @@ namespace Toplet_v0_Alpha.Interop
 
                 progressForm.ShowDialog();
                 GC.KeepAlive(callback);
+                wasCancelled3d = progressForm.WasCancelled;
             }
 
+            if (wasCancelled3d) return null;
             if (thrownEx != null) throw thrownEx;
             if (rc != 0) throw new InvalidOperationException($"Native solve_3d returned error code {rc}.");
 
@@ -165,6 +168,7 @@ namespace Toplet_v0_Alpha.Interop
             int rc = 0;
             Exception thrownEx = null;
             var sw = new Stopwatch();
+            bool wasCancelled2d = false;
 
             using (var progressForm = new SolverProgressForm(problem.MaxIterations))
             {
@@ -201,8 +205,10 @@ namespace Toplet_v0_Alpha.Interop
 
                 progressForm.ShowDialog();
                 GC.KeepAlive(callback);
+                wasCancelled2d = progressForm.WasCancelled;
             }
 
+            if (wasCancelled2d) return null;
             if (thrownEx != null) throw thrownEx;
             if (rc != 0) throw new InvalidOperationException($"Native solve_2d returned error code {rc}.");
 

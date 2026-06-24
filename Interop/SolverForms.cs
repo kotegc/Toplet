@@ -10,6 +10,8 @@ namespace Toplet_v0_Alpha.Interop
         private readonly Label _iterLabel;
         private readonly Label _compLabel;
 
+        public bool WasCancelled { get; private set; }
+
         public SolverProgressForm(int maxIter)
         {
             Text = "Topology Optimization";
@@ -18,7 +20,7 @@ namespace Toplet_v0_Alpha.Interop
             MinimizeBox = false;
             ControlBox = false;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(380, 110);
+            ClientSize = new Size(380, 144);
 
             Controls.Add(new Label {
                 Text = "Solving, please wait...",
@@ -50,6 +52,14 @@ namespace Toplet_v0_Alpha.Interop
                 Location = new Point(210, 70)
             };
             Controls.Add(_compLabel);
+
+            var cancelBtn = new Button {
+                Text     = "Cancel",
+                Location = new Point(150, 106),
+                Size     = new Size(80, 26)
+            };
+            cancelBtn.Click += (s, e) => { WasCancelled = true; Close(); };
+            Controls.Add(cancelBtn);
         }
 
         public void UpdateProgress(int iter, int maxIter, double compliance)

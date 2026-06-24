@@ -77,28 +77,16 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            LoadInputMode loadMode = LoadInputMode.Point;
-            SupportInputMode supportMode = SupportInputMode.Points;
+            double longestDim      = Math.Max(width, Math.Max(depth, height));
+            double defaultCellSize = Math.Max(longestDim / 30.0, doc.ModelAbsoluteTolerance * 10.0);
 
-            rc = GetBoundaryConditionModes(ref loadMode, ref supportMode);
-            if (rc != Result.Success)
-                return rc;
+            var setupForm = new TopletSetupForm(width, depth, height, defaultCellSize);
+            if (setupForm.ShowDialog() != System.Windows.Forms.DialogResult.OK)
+                return Result.Cancel;
 
-            double cellSize = 1.0;
-
-            int maxElementsX = 50;
-            int maxElementsY = 10;
-            int maxElementsZ = 50;
-
-            if (width / cellSize > maxElementsX ||
-                depth / cellSize > maxElementsY ||
-                height / cellSize > maxElementsZ)
-            {
-                double cellSizeX = width / maxElementsX;
-                double cellSizeY = depth / maxElementsY;
-                double cellSizeZ = height / maxElementsZ;
-                cellSize = Math.Max(cellSizeX, Math.Max(cellSizeY, cellSizeZ));
-            }
+            double cellSize = setupForm.CellSize;
+            LoadInputMode    loadMode    = setupForm.LoadIsFace    ? LoadInputMode.Face       : LoadInputMode.Point;
+            SupportInputMode supportMode = setupForm.SupportIsFace ? SupportInputMode.Faces   : SupportInputMode.Points;
 
             // Round up to even so the brep centroid lands exactly on a cell boundary,
             // giving identical left/right (and front/back) half-grids.
@@ -129,7 +117,7 @@ namespace Toplet_v0_Alpha
                 NelZ = nelz,
                 VolumeFraction = 0.5,
                 Penal = 3.0,
-                FilterRadius = 1.0,
+                FilterRadius = 1.5,
                 MaxIterations = 15
             };
 
@@ -138,17 +126,6 @@ namespace Toplet_v0_Alpha
             int nnz = nelz + 1;
             int nodeCount = nnx * nny * nnz;
             int dofCount = nodeCount * 3;
-
-            int maxDofs = 300000;
-
-            if (dofCount > maxDofs)
-            {
-                RhinoApp.WriteLine("Grid is too large for the current 3D solver setup.");
-                RhinoApp.WriteLine("Reduce element count or use a smaller solid.");
-                RhinoApp.WriteLine("Current DOF count: {0}", dofCount);
-                RhinoApp.WriteLine("Current soft limit: {0}", maxDofs);
-                return Result.Failure;
-            }
 
             double tol = Math.Max(doc.ModelAbsoluteTolerance, cellSize * 0.35);
 
@@ -268,7 +245,10 @@ namespace Toplet_v0_Alpha
                 return Result.Failure;
             }
 
-            if (result == null || result.Density == null)
+            if (result == null)
+                return Result.Cancel;
+
+            if (result.Density == null)
             {
                 RhinoApp.WriteLine("Solver returned no result.");
                 return Result.Failure;
@@ -286,39 +266,6 @@ namespace Toplet_v0_Alpha
 
             doc.Views.Redraw();
             return Result.Success;
-        }
-
-        private static Result GetBoundaryConditionModes(
-            ref LoadInputMode loadMode,
-            ref SupportInputMode supportMode)
-        {
-            GetOption go = new GetOption();
-            int loadPointOpt = go.AddOption("LoadPoint");
-            int loadFaceOpt = go.AddOption("LoadFace");
-            int supportPointsOpt = go.AddOption("SupportPoints");
-            int supportFacesOpt = go.AddOption("SupportFaces");
-            go.AcceptNothing(true);
-
-            while (true)
-            {
-                go.SetCommandPrompt(
-                    string.Format("Choose boundary condition modes. Current: Load={0}, Supports={1}. Press Enter to accept",
-                    loadMode, supportMode));
-
-                GetResult gr = go.Get();
-
-                if (gr == GetResult.Nothing)
-                    return Result.Success;
-
-                if (gr != GetResult.Option)
-                    return Result.Cancel;
-
-                int idx = go.OptionIndex();
-                if (idx == loadPointOpt) loadMode = LoadInputMode.Point;
-                if (idx == loadFaceOpt) loadMode = LoadInputMode.Face;
-                if (idx == supportPointsOpt) supportMode = SupportInputMode.Points;
-                if (idx == supportFacesOpt) supportMode = SupportInputMode.Faces;
-            }
         }
 
         private static Result BuildLoad(
@@ -815,5 +762,6 @@ namespace Toplet_v0_Alpha
         {
             return ix * (nny * nnz) + iy * nnz + iz;
         }
+
     }
 }

@@ -3,11 +3,18 @@
 #include <algorithm>
 
 #include "../include/Eigen/Sparse"
-#include "../include/Eigen/IterativeLinearSolvers"
 #include "../include/toplet_solver.h"
 
+#define AMGCL_NO_BOOST
+#include <amgcl/make_solver.hpp>
+#include <amgcl/backend/eigen.hpp>
+#include <amgcl/amg.hpp>
+#include <amgcl/coarsening/smoothed_aggregation.hpp>
+#include <amgcl/relaxation/spai0.hpp>
+#include <amgcl/solver/cg.hpp>
+
 // ---------------------------------------------------------------------------
-// Index helpers — match the C# 2D node indexing formulas exactly
+// Index helpers
 // ---------------------------------------------------------------------------
 static inline int node_index_2d(int ix, int iy, int nny)
 {
@@ -37,7 +44,6 @@ static void build_ke_2d(double nu, double KE[8][8])
         for (int j = 0; j < 8; j++)
             KE[i][j] = 0.0;
 
-    // Plane-stress elasticity matrix C (3x3), E=1
     const double c1 = 1.0 / (1.0 - nu*nu);
     const double c2 = nu / (1.0 - nu*nu);
     const double c3 = 0.5 * (1.0 - nu) / (1.0 - nu*nu);
@@ -46,11 +52,8 @@ static void build_ke_2d(double nu, double KE[8][8])
     C[1][0]=c2; C[1][1]=c1;
     C[2][2]=c3;
 
-    // Node positions of unit square — order matches element_dofs_2d above
     static const double xc[4] = {0, 1, 1, 0};
     static const double yc[4] = {0, 0, 1, 1};
-
-    // Sign arrays for bilinear shape function derivatives
     static const double sx[4] = {-1, 1, 1, -1};
     static const double sy[4] = {-1,-1, 1,  1};
 
@@ -62,14 +65,12 @@ static void build_ke_2d(double nu, double KE[8][8])
         const double xi  = gauss[ix];
         const double eta = gauss[iy];
 
-        // Shape function natural-coordinate derivatives (2 x 4)
         double dN[2][4];
         for (int i = 0; i < 4; i++) {
             dN[0][i] = 0.25 * sx[i] * (1.0 + sy[i]*eta);
             dN[1][i] = 0.25 * sy[i] * (1.0 + sx[i]*xi);
         }
 
-        // Jacobian J[2][2]
         double J[2][2] = {};
         for (int i = 0; i < 4; i++) {
             J[0][0] += dN[0][i]*xc[i]; J[0][1] += dN[0][i]*yc[i];
@@ -82,14 +83,12 @@ static void build_ke_2d(double nu, double KE[8][8])
         invJ[0][0] =  d*J[1][1]; invJ[0][1] = -d*J[0][1];
         invJ[1][0] = -d*J[1][0]; invJ[1][1] =  d*J[0][0];
 
-        // Physical derivatives (2 x 4)
         double dNxy[2][4] = {};
         for (int r = 0; r < 2; r++)
         for (int n = 0; n < 4; n++)
         for (int k = 0; k < 2; k++)
             dNxy[r][n] += invJ[r][k] * dN[k][n];
 
-        // Strain-displacement matrix B (3 x 8) for plane stress
         double B[3][8] = {};
         for (int n = 0; n < 4; n++) {
             int col = 2*n;
@@ -99,7 +98,6 @@ static void build_ke_2d(double nu, double KE[8][8])
             B[2][col]   = Ny; B[2][col+1] = Nx;
         }
 
-        // KE += B^T C B detJ   (Gauss weight = 1)
         double CB[3][8] = {};
         for (int r = 0; r < 3; r++)
         for (int s = 0; s < 8; s++)
@@ -140,11 +138,9 @@ int solve_2d(
         const int dof_count  = node_count * 2;
         const int elem_count = nelx * nely;
 
-        // Precompute element stiffness (same for all elements)
         double KE[8][8];
         build_ke_2d(nu, KE);
 
-        // --- Identify which nodes are touched by at least one active element ---
         std::vector<bool> active_node(node_count, false);
         for (int ex = 0; ex < nelx; ex++)
         for (int ey = 0; ey < nely; ey++) {
@@ -154,7 +150,6 @@ int solve_2d(
             for (int i = 0; i < 8; i++) active_node[dofs[i]/2] = true;
         }
 
-        // --- Build free DOF list ---
         std::vector<int> free_dofs;
         free_dofs.reserve(dof_count);
         for (int node = 0; node < node_count; node++) {
@@ -169,12 +164,10 @@ int solve_2d(
         std::vector<int> dof_to_free(dof_count, -1);
         for (int i = 0; i < nfree; i++) dof_to_free[free_dofs[i]] = i;
 
-        // --- Initialize element densities ---
         std::vector<double> x(elem_count, 0.0);
         for (int e = 0; e < elem_count; e++)
             if (mask_flat[e]) x[e] = vol_frac;
 
-        // --- Precompute sensitivity filter stencil ---
         const int rfloor = (int)std::floor(filter_rad);
         struct FilterEntry { int dx, dy; double weight; };
         std::vector<FilterEntry> stencil;
@@ -190,57 +183,102 @@ int solve_2d(
         std::vector<double> x_new(elem_count, 0.0);
         double compliance = 0.0;
 
+        int active_count = 0;
+        for (int e = 0; e < elem_count; e++) if (mask_flat[e]) active_count++;
+
+        // ===================================================================
+        // Pre-build sparsity pattern once
+        // ===================================================================
+        Eigen::SparseMatrix<double, Eigen::RowMajor> Kff(nfree, nfree);
+        {
+            typedef Eigen::Triplet<double> T;
+            std::vector<T> pat;
+            pat.reserve((size_t)active_count * 64);
+            for (int ex = 0; ex < nelx; ex++)
+            for (int ey = 0; ey < nely; ey++) {
+                const int eidx = ex*nely + ey;
+                if (!mask_flat[eidx]) continue;
+                int edofs[8];
+                element_dofs_2d(ex, ey, nny, edofs);
+                for (int i = 0; i < 8; i++) {
+                    const int fi = dof_to_free[edofs[i]]; if (fi < 0) continue;
+                    for (int j = 0; j < 8; j++) {
+                        const int fj = dof_to_free[edofs[j]]; if (fj < 0) continue;
+                        pat.emplace_back(fi, fj, 0.0);
+                    }
+                }
+            }
+            Kff.setFromTriplets(pat.begin(), pat.end());
+        }
+        Kff.makeCompressed();
+
+        struct KEntry { int vidx; double ke; };
+        std::vector<std::vector<KEntry>> elem_k(elem_count);
+        {
+            const int* outer = Kff.outerIndexPtr();
+            const int* inner = Kff.innerIndexPtr();
+            for (int ex = 0; ex < nelx; ex++)
+            for (int ey = 0; ey < nely; ey++) {
+                const int eidx = ex*nely + ey;
+                if (!mask_flat[eidx]) continue;
+                int edofs[8];
+                element_dofs_2d(ex, ey, nny, edofs);
+                auto& ev = elem_k[eidx];
+                ev.reserve(64);
+                for (int i = 0; i < 8; i++) {
+                    const int fi = dof_to_free[edofs[i]]; if (fi < 0) continue;
+                    for (int j = 0; j < 8; j++) {
+                        const int fj = dof_to_free[edofs[j]]; if (fj < 0) continue;
+                        int lo = outer[fi], hi = outer[fi + 1];
+                        int pos = (int)(std::lower_bound(inner + lo, inner + hi, fj) - inner);
+                        ev.push_back({pos, KE[i][j]});
+                    }
+                }
+            }
+        }
+
+        Eigen::VectorXd Ff(nfree);
+        for (int i = 0; i < nfree; i++) Ff(i) = forces[free_dofs[i]];
+
+        using AmgBackend = amgcl::backend::eigen<double>;
+        using AmgSolver = amgcl::make_solver<
+            amgcl::amg<
+                AmgBackend,
+                amgcl::coarsening::smoothed_aggregation,
+                amgcl::relaxation::spai0
+            >,
+            amgcl::solver::cg<AmgBackend>
+        >;
+        AmgSolver::params amg_prm;
+        amg_prm.solver.tol     = 1e-3;
+        amg_prm.solver.maxiter = 100;
+
+        Eigen::VectorXd Uf = Eigen::VectorXd::Zero(nfree);
+
         // ===================================================================
         // Main iteration loop
         // ===================================================================
         for (int iter = 0; iter < max_iter; iter++) {
 
-            // --- Assemble sparse Kff ---
-            typedef Eigen::Triplet<double> T;
-            std::vector<T> triplets;
-            triplets.reserve(elem_count * 8);
+            double* kvals = Kff.valuePtr();
+            std::fill(kvals, kvals + Kff.nonZeros(), 0.0);
 
             for (int ex = 0; ex < nelx; ex++)
             for (int ey = 0; ey < nely; ey++) {
                 const int eidx = ex*nely + ey;
                 if (!mask_flat[eidx]) continue;
-
-                const double rho = x[eidx];
-                const double Ee  = Emin + std::pow(rho, penal) * (E0 - Emin);
-
-                int edofs[8];
-                element_dofs_2d(ex, ey, nny, edofs);
-
-                for (int i = 0; i < 8; i++) {
-                    const int fi = dof_to_free[edofs[i]];
-                    if (fi < 0) continue;
-                    for (int j = 0; j < 8; j++) {
-                        const int fj = dof_to_free[edofs[j]];
-                        if (fj < 0) continue;
-                        triplets.emplace_back(fi, fj, Ee * KE[i][j]);
-                    }
-                }
+                const double Ee = Emin + std::pow(x[eidx], penal) * (E0 - Emin);
+                for (const auto& e : elem_k[eidx])
+                    kvals[e.vidx] += Ee * e.ke;
             }
 
-            Eigen::SparseMatrix<double> Kff(nfree, nfree);
-            Kff.setFromTriplets(triplets.begin(), triplets.end());
-
-            Eigen::VectorXd Ff(nfree);
-            for (int i = 0; i < nfree; i++) Ff(i) = forces[free_dofs[i]];
-
-            Eigen::ConjugateGradient<
-                Eigen::SparseMatrix<double>,
-                Eigen::Lower | Eigen::Upper
-            > cg;
-            cg.setMaxIterations(std::min(5000, nfree / 2 + 1000));
-            cg.setTolerance(1e-6);
-            cg.compute(Kff);
-            const Eigen::VectorXd Uf = cg.solve(Ff);
+            AmgSolver amg(Kff, amg_prm);
+            size_t amg_iters; double amg_error;
+            std::tie(amg_iters, amg_error) = amg(Ff, Uf);
 
             Eigen::VectorXd U = Eigen::VectorXd::Zero(dof_count);
             for (int i = 0; i < nfree; i++) U(free_dofs[i]) = Uf(i);
 
-            // --- Compliance and sensitivities ---
             compliance = 0.0;
             std::fill(dc.begin(), dc.end(), 0.0);
 
@@ -268,7 +306,6 @@ int solve_2d(
                 dc[eidx] = -penal * std::pow(rho, penal - 1.0) * (E0 - Emin) * ce;
             }
 
-            // --- Sensitivity filter ---
             std::fill(dc_filt.begin(), dc_filt.end(), 0.0);
             for (int ex = 0; ex < nelx; ex++)
             for (int ey = 0; ey < nely; ey++) {
@@ -287,10 +324,6 @@ int solve_2d(
                 const double denom = x[eidx] * sum_w;
                 dc_filt[eidx] = (denom > 1e-12) ? val / denom : dc[eidx];
             }
-
-            // --- OC update ---
-            int active_count = 0;
-            for (int e = 0; e < elem_count; e++) if (mask_flat[e]) active_count++;
 
             const double target_vol = vol_frac * active_count;
             const double move = 0.2, xmin = 0.001;
@@ -319,7 +352,6 @@ int solve_2d(
                 if (total > target_vol) l1 = lmid; else l2 = lmid;
             }
 
-            // --- Convergence check ---
             double change = 0.0;
             for (int e = 0; e < elem_count; e++) {
                 if (!mask_flat[e]) { x[e] = 0.0; continue; }
