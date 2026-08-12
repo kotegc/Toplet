@@ -14,23 +14,28 @@ The goal is not production-grade analysis, but a clear and flexible
 environment for exploring topology optimization concepts within a CAD
 workflow.
 
-**Status:** active WIP. The Rhino/Grasshopper-side workflow — voxelizing a
-Brep into a design domain, setting point/face loads and supports, running a
-solve, viewing the result — works end to end. The solver itself doesn't
-produce valid results yet; I'm still tuning methods and parameters. Part of
-that: 2D and 3D currently use two different linear-solve strategies as an
-active trade study —
+**Status:** active WIP, and honestly a bit messy under the hood — the solver
+internals have been rewritten several times chasing a setup that actually
+works, and that hasn't landed yet. The Rhino/Grasshopper-side workflow works
+end to end for both dimensionalities: 2D voxelizes a closed **curve** into a
+design domain (`Toplet2DCommand.cs`), 3D voxelizes a closed **Brep**
+(`Toplet3DCommand.cs`); both let you set point/face loads and supports, run
+a solve, and view the result. The solvers themselves don't produce valid
+results yet — still tuning methods and parameters — and the two
+dimensionalities currently use different linear-solve backends:
 
 - **2D** (`TopletSolverNative/src/solve_2d.cpp`) uses Eigen's Conjugate
   Gradient with an incomplete-Cholesky preconditioner.
 - **3D** (`TopletSolverNative/src/solve_3d.cpp`) uses a hand-rolled
   geometric-multigrid-preconditioned CG, since plain CG didn't scale to 3D
   grid sizes.
-- **AMGCL** (vendored under `TopletSolverNative/include/amgcl/`) is a third
-  candidate — algebraic multigrid, no hand-tuned grid hierarchy needed — but
-  isn't wired into either solve path yet.
 
-None of the three has been declared a winner. The main open problem is
+That split isn't a settled or symmetric design decision — it's just where
+each path currently stands. The one *active, open* trade study is specific
+to the 3D backend: the current hand-rolled GMG above vs. **AMGCL** (vendored
+under `TopletSolverNative/include/amgcl/`, algebraic multigrid, no
+hand-tuned grid hierarchy needed), which is vendored but not yet wired into
+`solve_3d`. Neither has been declared a winner. The main open problem is
 getting a solve to converge to a *valid* result fast enough to be usable
 interactively, not just fast in isolation.
 
@@ -71,7 +76,7 @@ interactively, not just fast in isolation.
 
 ## Features
 
-- Voxelized optimization domain from closed Breps
+- Voxelized optimization domain from a closed curve (2D) or closed Brep (3D)
 - Point and face-based constraints
 - Point loads/supports for localized control
 - Face loads/supports with distributed forces along surface normals
@@ -81,7 +86,9 @@ interactively, not just fast in isolation.
 ## Roadmap
 
 1. **Solver validity** *(current)* — get 2D and 3D both converging to a
-   physically sensible result; resolve the CG/GMG/AMGCL trade study.
+   physically sensible result; resolve the GMG-vs-AMGCL trade study for the
+   3D backend. Whether 2D should end up on the same backend as 3D is an open
+   question, not yet decided.
 2. **Performance** — once results are valid, get the solve loop fast enough
    for interactive use at useful grid resolutions.
 3. **Everything else** — UI polish, more constraint types, is on hold until
