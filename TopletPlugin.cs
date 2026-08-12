@@ -1,7 +1,7 @@
 ﻿using Rhino;
 using System;
 
-namespace Toplet_v0_Alpha
+namespace Toplet
 {
     ///<summary>
     /// <para>Every RhinoCommon .rhp assembly must have one and only one PlugIn-derived

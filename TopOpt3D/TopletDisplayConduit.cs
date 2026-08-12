@@ -4,7 +4,7 @@ using System.Drawing;
 using Rhino.Display;
 using Rhino.Geometry;
 
-namespace Toplet_v0_Alpha.TopOpt3D
+namespace Toplet.TopOpt3D
 {
     public enum TopletDisplayMode { DensityHeatmap, SolidVoid, Ghosted }
 

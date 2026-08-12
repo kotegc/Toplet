@@ -2,7 +2,7 @@ using Rhino;
 using Rhino.DocObjects;
 using Rhino.Geometry;
 
-namespace Toplet_v0_Alpha.TopOpt3D
+namespace Toplet.TopOpt3D
 {
     public static class Visualization3D
     {

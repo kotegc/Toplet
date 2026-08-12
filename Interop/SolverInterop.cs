@@ -3,16 +3,21 @@ using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using Toplet_v0_Alpha.TopOpt2D;
-using Toplet_v0_Alpha.TopOpt3D;
+using Rhino;
+using Toplet.TopOpt2D;
+using Toplet.TopOpt3D;
 
-namespace Toplet_v0_Alpha.Interop
+namespace Toplet.Interop
 {
     internal static class NativeMethods
     {
         private const string DllName = "TopletSolverNative";
+
+        // Must match toplet_solver.h's recommended diag_buf_capacity.
+        internal const int DiagBufCapacity = 8192;
 
         // Pre-load the DLL using its full path before P/Invoke tries to resolve
         // it by name. This is necessary inside Rhino because the plugin directory
@@ -31,7 +36,7 @@ namespace Toplet_v0_Alpha.Interop
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         internal delegate void ProgressCallback(int iter, int maxIter, double compliance);
 
-        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
+        [DllImport(DllName, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
         internal static extern int solve_3d(
             [In]  byte[]   mask_flat,
             [In]  double[] forces,
@@ -42,7 +47,9 @@ namespace Toplet_v0_Alpha.Interop
             [Out] double[] density_out,
             out   double   compliance,
             out   int      iterations,
-            ProgressCallback progressCb);
+            ProgressCallback progressCb,
+            [Out] StringBuilder diagBufOut,
+            int diagBufCapacity);
 
         [DllImport(DllName, CallingConvention = CallingConvention.Cdecl)]
         internal static extern int solve_2d(
@@ -56,6 +63,78 @@ namespace Toplet_v0_Alpha.Interop
             out   double   compliance,
             out   int      iterations,
             ProgressCallback progressCb);
+    }
+
+    // Shared by NativeSolver2D/NativeSolver3D: both drive a native solve call
+    // from a background task while a modal progress form owns the UI thread,
+    // then surface cancellation/exceptions/error codes the same way. Only the
+    // native call itself (and the mask flattening around it) differs by
+    // dimensionality, so that part stays in each Solve() method below.
+    internal readonly struct SolveOutcome
+    {
+        public readonly bool WasCancelled;
+        public readonly int Rc;
+        public readonly double Compliance;
+        public readonly int Iterations;
+        public readonly TimeSpan Elapsed;
+
+        public SolveOutcome(bool wasCancelled, int rc, double compliance, int iterations, TimeSpan elapsed)
+        {
+            WasCancelled = wasCancelled;
+            Rc = rc;
+            Compliance = compliance;
+            Iterations = iterations;
+            Elapsed = elapsed;
+        }
+    }
+
+    internal static class NativeSolverRunner
+    {
+        public static SolveOutcome Run(int maxIterations, Func<NativeMethods.ProgressCallback, (int rc, double compliance, int iterations)> nativeCall)
+        {
+            int rc = 0;
+            double compliance = 0;
+            int iterations = 0;
+            Exception thrownEx = null;
+            var sw = new Stopwatch();
+            bool wasCancelled;
+
+            using (var progressForm = new SolverProgressForm(maxIterations))
+            {
+                NativeMethods.ProgressCallback callback = (iter, maxIter, comp) =>
+                {
+                    if (progressForm.IsHandleCreated)
+                        progressForm.BeginInvoke(new Action(() =>
+                            progressForm.UpdateProgress(iter, maxIter, comp)));
+                };
+
+                progressForm.Shown += (s, e) =>
+                {
+                    sw.Start();
+                    Task.Run(() =>
+                    {
+                        try
+                        {
+                            (rc, compliance, iterations) = nativeCall(callback);
+                        }
+                        catch (Exception ex) { thrownEx = ex; }
+                        finally
+                        {
+                            sw.Stop();
+                            if (progressForm.IsHandleCreated)
+                                progressForm.BeginInvoke(new Action(() => progressForm.Close()));
+                        }
+                    });
+                };
+
+                progressForm.ShowDialog();
+                GC.KeepAlive(callback);
+                wasCancelled = progressForm.WasCancelled;
+            }
+
+            if (thrownEx != null) throw thrownEx;
+            return new SolveOutcome(wasCancelled, rc, compliance, iterations, sw.Elapsed);
+        }
     }
 
     public static class NativeSolver3D
@@ -78,57 +157,30 @@ namespace Toplet_v0_Alpha.Interop
                 fixedFlat[i] = fixedBool[i] ? (byte)1 : (byte)0;
 
             double[] densityFlat = new double[elemCount];
-            double compliance = 0;
-            int iterations = 0;
-            int rc = 0;
-            Exception thrownEx = null;
-            var sw = new Stopwatch();
-            bool wasCancelled3d = false;
+            var diagBuf = new StringBuilder(NativeMethods.DiagBufCapacity);
 
-            using (var progressForm = new SolverProgressForm(problem.MaxIterations))
+            SolveOutcome outcome = NativeSolverRunner.Run(problem.MaxIterations, callback =>
             {
-                NativeMethods.ProgressCallback callback = (iter, maxIter, comp) =>
-                {
-                    if (progressForm.IsHandleCreated)
-                        progressForm.BeginInvoke(new Action(() =>
-                            progressForm.UpdateProgress(iter, maxIter, comp)));
-                };
+                int rc = NativeMethods.solve_3d(
+                    maskFlat, domain.Forces, fixedFlat,
+                    nelx, nely, nelz,
+                    problem.VolumeFraction, problem.Penal, problem.FilterRadius, problem.MaxIterations,
+                    problem.YoungsModulusSolid, problem.YoungsModulusMin, problem.PoissonRatio,
+                    densityFlat, out double compliance, out int iterations, callback,
+                    diagBuf, diagBuf.Capacity);
+                return (rc, compliance, iterations);
+            });
 
-                progressForm.Shown += (s, e) =>
-                {
-                    sw.Start();
-                    Task.Run(() =>
-                    {
-                        try
-                        {
-                            rc = NativeMethods.solve_3d(
-                                maskFlat, domain.Forces, fixedFlat,
-                                nelx, nely, nelz,
-                                problem.VolumeFraction, problem.Penal, problem.FilterRadius, problem.MaxIterations,
-                                problem.YoungsModulusSolid, problem.YoungsModulusMin, problem.PoissonRatio,
-                                densityFlat, out compliance, out iterations, callback);
-                        }
-                        catch (Exception ex) { thrownEx = ex; }
-                        finally
-                        {
-                            sw.Stop();
-                            if (progressForm.IsHandleCreated)
-                                progressForm.BeginInvoke(new Action(() => progressForm.Close()));
-                        }
-                    });
-                };
+            // GMG solver diagnostics: printed to Rhino's command line rather than
+            // a blocking dialog, so a solve never stalls waiting on user input.
+            if (diagBuf.Length > 0)
+                RhinoApp.WriteLine(diagBuf.ToString());
 
-                progressForm.ShowDialog();
-                GC.KeepAlive(callback);
-                wasCancelled3d = progressForm.WasCancelled;
-            }
+            if (outcome.WasCancelled) return null;
+            if (outcome.Rc != 0) throw new InvalidOperationException($"Native solve_3d returned error code {outcome.Rc}.");
 
-            if (wasCancelled3d) return null;
-            if (thrownEx != null) throw thrownEx;
-            if (rc != 0) throw new InvalidOperationException($"Native solve_3d returned error code {rc}.");
-
-            bool converged = iterations < problem.MaxIterations;
-            using (var doneForm = new SolverCompletedForm(iterations, problem.MaxIterations, compliance, sw.Elapsed, converged))
+            bool converged = outcome.Iterations < problem.MaxIterations;
+            using (var doneForm = new SolverCompletedForm(outcome.Iterations, problem.MaxIterations, outcome.Compliance, outcome.Elapsed, converged))
                 doneForm.ShowDialog();
 
             double[,,] density = new double[nelx, nely, nelz];
@@ -139,7 +191,7 @@ namespace Toplet_v0_Alpha.Interop
 
             return new TopOptResult3D {
                 NelX = nelx, NelY = nely, NelZ = nelz,
-                Density = density, Compliance = compliance, Iterations = iterations
+                Density = density, Compliance = outcome.Compliance, Iterations = outcome.Iterations
             };
         }
     }
@@ -163,57 +215,23 @@ namespace Toplet_v0_Alpha.Interop
                 fixedFlat[i] = fixedBool[i] ? (byte)1 : (byte)0;
 
             double[] densityFlat = new double[elemCount];
-            double compliance = 0;
-            int iterations = 0;
-            int rc = 0;
-            Exception thrownEx = null;
-            var sw = new Stopwatch();
-            bool wasCancelled2d = false;
 
-            using (var progressForm = new SolverProgressForm(problem.MaxIterations))
+            SolveOutcome outcome = NativeSolverRunner.Run(problem.MaxIterations, callback =>
             {
-                NativeMethods.ProgressCallback callback = (iter, maxIter, comp) =>
-                {
-                    if (progressForm.IsHandleCreated)
-                        progressForm.BeginInvoke(new Action(() =>
-                            progressForm.UpdateProgress(iter, maxIter, comp)));
-                };
+                int rc = NativeMethods.solve_2d(
+                    maskFlat, domain.Forces, fixedFlat,
+                    nelx, nely,
+                    problem.VolumeFraction, problem.Penal, problem.FilterRadius, problem.MaxIterations,
+                    problem.YoungsModulusSolid, problem.YoungsModulusMin, problem.PoissonRatio,
+                    densityFlat, out double compliance, out int iterations, callback);
+                return (rc, compliance, iterations);
+            });
 
-                progressForm.Shown += (s, e) =>
-                {
-                    sw.Start();
-                    Task.Run(() =>
-                    {
-                        try
-                        {
-                            rc = NativeMethods.solve_2d(
-                                maskFlat, domain.Forces, fixedFlat,
-                                nelx, nely,
-                                problem.VolumeFraction, problem.Penal, problem.FilterRadius, problem.MaxIterations,
-                                problem.YoungsModulusSolid, problem.YoungsModulusMin, problem.PoissonRatio,
-                                densityFlat, out compliance, out iterations, callback);
-                        }
-                        catch (Exception ex) { thrownEx = ex; }
-                        finally
-                        {
-                            sw.Stop();
-                            if (progressForm.IsHandleCreated)
-                                progressForm.BeginInvoke(new Action(() => progressForm.Close()));
-                        }
-                    });
-                };
+            if (outcome.WasCancelled) return null;
+            if (outcome.Rc != 0) throw new InvalidOperationException($"Native solve_2d returned error code {outcome.Rc}.");
 
-                progressForm.ShowDialog();
-                GC.KeepAlive(callback);
-                wasCancelled2d = progressForm.WasCancelled;
-            }
-
-            if (wasCancelled2d) return null;
-            if (thrownEx != null) throw thrownEx;
-            if (rc != 0) throw new InvalidOperationException($"Native solve_2d returned error code {rc}.");
-
-            bool converged = iterations < problem.MaxIterations;
-            using (var doneForm = new SolverCompletedForm(iterations, problem.MaxIterations, compliance, sw.Elapsed, converged))
+            bool converged = outcome.Iterations < problem.MaxIterations;
+            using (var doneForm = new SolverCompletedForm(outcome.Iterations, problem.MaxIterations, outcome.Compliance, outcome.Elapsed, converged))
                 doneForm.ShowDialog();
 
             double[,] density = new double[nelx, nely];
@@ -223,7 +241,7 @@ namespace Toplet_v0_Alpha.Interop
 
             return new TopOptResult2D {
                 NelX = nelx, NelY = nely,
-                Density = density, Compliance = compliance, Iterations = iterations
+                Density = density, Compliance = outcome.Compliance, Iterations = outcome.Iterations
             };
         }
     }

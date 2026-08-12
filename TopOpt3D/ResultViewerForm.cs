@@ -4,7 +4,7 @@ using System.Windows.Forms;
 using Rhino;
 using Rhino.DocObjects;
 
-namespace Toplet_v0_Alpha.TopOpt3D
+namespace Toplet.TopOpt3D
 {
     internal sealed class ResultViewerForm : Form
     {

@@ -3,7 +3,7 @@ using System.Threading.Tasks;
 using Rhino.Geometry;
 using Rhino.Geometry.Intersect;
 
-namespace Toplet_v0_Alpha.TopOpt3D
+namespace Toplet.TopOpt3D
 {
     public static class VoxelDomainBuilder3D
     {

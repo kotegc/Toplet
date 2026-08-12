@@ -2,7 +2,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace Toplet_v0_Alpha.Interop
+namespace Toplet.Interop
 {
     internal sealed class SolverProgressForm : Form
     {

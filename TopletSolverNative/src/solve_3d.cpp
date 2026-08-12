@@ -4,17 +4,16 @@
 #include <cstdarg>
 #include <cstring>
 #include <string>
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
 
 #include "../include/Eigen/Sparse"
 #include "../include/Eigen/SparseCholesky"
 #include "../include/toplet_solver.h"
 
 // ---------------------------------------------------------------------------
-// Throwaway diagnostics: buffer collected during solve, shown in a MessageBox
-// (auto-copied to clipboard) when solve finishes. No file artifact.
+// GMG solve diagnostics: text log accumulated during hierarchy setup and the
+// PCG solve, handed back to the caller via diag_buf_out at the end of
+// solve_3d. This function has no UI of its own — the caller decides how or
+// whether to surface the text (e.g. printed to Rhino's command line).
 // ---------------------------------------------------------------------------
 static thread_local std::string gmg_diag_buf;
 
@@ -25,22 +24,15 @@ static void gmg_log(const char* fmt, ...) {
     va_end(args);
     gmg_diag_buf += buf;
 }
-static void gmg_show_diag() {
-    if (gmg_diag_buf.empty()) return;
-    // Auto-copy to clipboard so user can paste it
-    if (OpenClipboard(NULL)) {
-        EmptyClipboard();
-        size_t len = gmg_diag_buf.size() + 1;
-        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, len);
-        if (hMem) {
-            void* ptr = GlobalLock(hMem);
-            if (ptr) { std::memcpy(ptr, gmg_diag_buf.c_str(), len); GlobalUnlock(hMem); }
-            SetClipboardData(CF_TEXT, hMem);
-        }
-        CloseClipboard();
+
+// Copies the accumulated diagnostics into a caller-provided buffer
+// (null-terminated, truncated to fit) and clears the internal buffer.
+static void gmg_flush_diag(char* out, int capacity) {
+    if (out && capacity > 0) {
+        size_t n = std::min((size_t)(capacity - 1), gmg_diag_buf.size());
+        std::memcpy(out, gmg_diag_buf.data(), n);
+        out[n] = '\0';
     }
-    std::string msg = gmg_diag_buf + "\n(text copied to clipboard)";
-    MessageBoxA(NULL, msg.c_str(), "GMG Diagnostics", MB_OK | MB_SETFOREGROUND);
     gmg_diag_buf.clear();
 }
 
@@ -468,7 +460,9 @@ int solve_3d(
     double* density_out,
     double* compliance_out,
     int*    iterations_out,
-    progress_callback_t progress_cb)
+    progress_callback_t progress_cb,
+    char*   diag_buf_out,
+    int     diag_buf_capacity)
 {
     gmg_diag_buf.clear();
 
@@ -728,7 +722,7 @@ int solve_3d(
                 std::copy(x.begin(), x.end(), density_out);
                 *compliance_out = compliance;
                 *iterations_out = iter + 1;
-                gmg_show_diag();
+                gmg_flush_diag(diag_buf_out, diag_buf_capacity);
                 return 0;
             }
         }
@@ -736,11 +730,11 @@ int solve_3d(
         std::copy(x.begin(), x.end(), density_out);
         *compliance_out = compliance;
         *iterations_out = max_iter;
-        gmg_show_diag();
+        gmg_flush_diag(diag_buf_out, diag_buf_capacity);
         return 0;
     }
     catch (...) {
-        gmg_show_diag();
+        gmg_flush_diag(diag_buf_out, diag_buf_capacity);
         return 1;
     }
 }

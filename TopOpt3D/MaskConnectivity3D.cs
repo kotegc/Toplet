@@ -2,7 +2,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Toplet_v0_Alpha.TopOpt3D
+namespace Toplet.TopOpt3D
 {
     public static class MaskConnectivity3D
     {

@@ -1,5 +1,5 @@
-﻿using Toplet_v0_Alpha.TopOpt3D;
-using Toplet_v0_Alpha.Interop;
+﻿using Toplet.TopOpt3D;
+using Toplet.Interop;
 using Rhino;
 using Rhino.Commands;
 using Rhino.DocObjects;
@@ -9,7 +9,7 @@ using Rhino.Input.Custom;
 using System;
 using System.Collections.Generic;
 
-namespace Toplet_v0_Alpha
+namespace Toplet
 {
     public class Toplet3DCommand : Command
     {

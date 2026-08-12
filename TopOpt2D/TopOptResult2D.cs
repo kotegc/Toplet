@@ -1,4 +1,4 @@
-namespace Toplet_v0_Alpha.TopOpt2D
+namespace Toplet.TopOpt2D
 {
     public class TopOptResult2D
     {

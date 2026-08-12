@@ -1,5 +1,5 @@
-﻿using Toplet_v0_Alpha.TopOpt2D;
-using Toplet_v0_Alpha.Interop;
+﻿using Toplet.TopOpt2D;
+using Toplet.Interop;
 using Eto.Forms;
 using Rhino;
 using Rhino.Commands;
@@ -11,7 +11,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-namespace Toplet_v0_Alpha
+namespace Toplet
 {
     public class Toplet2DCommand : Rhino.Commands.Command
     {
@@ -266,7 +266,17 @@ namespace Toplet_v0_Alpha
                 FixedDofs = fixedDofs
             };
 
-            TopOptResult2D result = NativeSolver2D.Solve(problem, domain);
+            TopOptResult2D result;
+            try
+            {
+                result = NativeSolver2D.Solve(problem, domain);
+            }
+            catch (Exception ex)
+            {
+                RhinoApp.WriteLine("TopOpt2D solve failed.");
+                RhinoApp.WriteLine(ex.Message);
+                return Result.Failure;
+            }
 
             if (result == null || result.Density == null)
             {
