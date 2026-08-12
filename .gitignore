@@ -1,0 +1,33 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Build output
+bin/
+obj/
+
+# VS Code / Rider
+.vscode/
+.idea/
+
+# NuGet
+packages/
+*.nupkg
+
+# Logs
+*.log
+
+# Native C++ build output (TopletSolverNative) — missing before, which
+# is exactly how compiled artifacts ended up tracked in the prior repo
+x64/
+*.obj
+*.pdb
+*.tlog
+*.lastbuildstate
+*.recipe
+*.ilk
+*.iobj
+*.idb
+*.exp
+*.lib
