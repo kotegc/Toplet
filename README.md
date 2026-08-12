@@ -17,27 +17,46 @@ workflow.
 **Status:** active WIP, and honestly a bit messy under the hood — the solver
 internals have been rewritten several times chasing a setup that actually
 works, and that hasn't landed yet. The Rhino/Grasshopper-side workflow works
-end to end for both dimensionalities: 2D voxelizes a closed **curve** into a
-design domain (`Toplet2DCommand.cs`), 3D voxelizes a closed **Brep**
-(`Toplet3DCommand.cs`); both let you set point/face loads and supports, run
-a solve, and view the result. The solvers themselves don't produce valid
-results yet — still tuning methods and parameters — and the two
-dimensionalities currently use different linear-solve backends:
+end to end; the solvers themselves don't produce valid results yet — still
+tuning methods and parameters. See **Commands** below for what the plugin
+does, and **Solver backends** for what's still unresolved under the hood.
 
-- **2D** (`TopletSolverNative/src/solve_2d.cpp`) uses Eigen's Conjugate
-  Gradient with an incomplete-Cholesky preconditioner.
-- **3D** (`TopletSolverNative/src/solve_3d.cpp`) uses a hand-rolled
-  geometric-multigrid-preconditioned CG, since plain CG didn't scale to 3D
-  grid sizes.
+## Commands
 
-That split isn't a settled or symmetric design decision — it's just where
-each path currently stands. The one *active, open* trade study is specific
-to the 3D backend: the current hand-rolled GMG above vs. **AMGCL** (vendored
-under `TopletSolverNative/include/amgcl/`, algebraic multigrid, no
-hand-tuned grid hierarchy needed), which is vendored but not yet wired into
-`solve_3d`. Neither has been declared a winner. The main open problem is
-getting a solve to converge to a *valid* result fast enough to be usable
-interactively, not just fast in isolation.
+Toplet adds two Rhino commands:
+
+- **`Toplet2D`** (`Toplet2DCommand.cs`) — takes a closed curve and voxelizes
+  the region it encloses into a 2D grid.
+- **`Toplet3D`** (`Toplet3DCommand.cs`) — takes a closed Brep and voxelizes
+  its interior into a 3D grid.
+
+Both then follow the same workflow: set point/face loads and supports on the
+voxelized domain, run a solve, and view the resulting material-density
+result in the Rhino viewport.
+
+## Solver backends
+
+Each solve ultimately comes down to solving a large sparse linear system,
+and there are a few different ways to do that:
+
+- **Conjugate Gradient (CG) with an incomplete-Cholesky preconditioner** —
+  Eigen's built-in implementation. Straightforward, no setup cost, but
+  doesn't scale well as grid size grows.
+- **Geometric multigrid (GMG)**, hand-rolled for this project, used as a CG
+  preconditioner — builds an explicit coarse-grid hierarchy over the voxel
+  domain to accelerate convergence at larger grid sizes.
+- **AMGCL** — a vendored algebraic multigrid library
+  (`TopletSolverNative/include/amgcl/`). Algebraic multigrid builds its
+  hierarchy from the matrix itself rather than an explicit geometric grid,
+  so it doesn't need the hand-tuned coarsening logic GMG does here.
+
+Right now, `solve_2d.cpp` uses the first and `solve_3d.cpp` uses the second;
+AMGCL is vendored but not wired into either. That pairing isn't settled —
+which backend ends up serving which command is still an open question, not
+a deliberate or final choice. The one *active* comparison is GMG vs. AMGCL
+for the 3D backend specifically; neither has been declared a winner. The
+main open problem is getting a solve to converge to a *valid* result fast
+enough to be usable interactively, not just fast in isolation.
 
 ## How it works
 
